@@ -10,10 +10,27 @@ means. A working version of everything (the 2026-10-22 pilot, with its results) 
 
 ## Setup (once)
 
+Needs Python 3.12. Keep the version pins in `requirements.txt` (`numpy<2`, `pyarrow<21`, `datasets<4`):
+newer versions clash with each other and with transformer-lens 2.16.1.
+
+Mac / Linux, with [uv](https://docs.astral.sh/uv/):
+
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
+
+Windows (PowerShell or Git Bash), no uv needed:
+
+```bash
+py -3.12 -m venv .venv
+.venv/Scripts/python -m pip install --upgrade pip
+.venv/Scripts/python -m pip install -r requirements.txt
+```
+
+Check it worked: `python -c "import transformer_lens"` with the venv's python should print nothing.
+
+On Windows, use `.venv/Scripts/python` wherever the commands below say `.venv/bin/python`.
 
 ## Run, in this order (once built)
 
