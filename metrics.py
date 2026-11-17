@@ -2,8 +2,10 @@
 
 Every IOI function returns one value per prompt so analyze.py can bootstrap over prompts.
 """
+from pathlib import Path
 
 import torch
+from datasets import load_dataset
 
 
 # ---------- benchmark: perplexity ----------
@@ -11,12 +13,50 @@ import torch
 def load_ppl_windows(tokenizer, cfg) -> torch.Tensor:
     """First cfg.ppl_tokens tokens of WikiText-2 test (Salesforce/wikitext, wikitext-2-raw-v1), joined with "\\n\\n",
     as non-overlapping [n, cfg.ppl_window] windows. Cached to <data_dir>/ so the download happens once."""
-    raise NotImplementedError
+    # cached windows, named by size so --quick (4096 tokens) and full runs don't share a file
+    cache_path = Path(cfg.data_dir) / f"wikitext2_test_{cfg.ppl_tokens}_{cfg.ppl_window}.pt"
+
+    # already downloaded before, just load it
+    if cache_path.exists():
+        return torch.load(cache_path)
+
+    # first run: download the WikiText-2 test split, ["text"] is a list of lines
+    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+
+    # one long string, lines separated by "\n\n" (standard HF perplexity recipe)
+    text = "\n\n".join(dataset["text"])
+
+    # tokenizes the text into one long 1-D tensor of token ids (no truncation, step 5 cuts it)
+    # tokenizer gives back a dict, only need "input_ids", [0] drops the batch dim of 1
+    tokens = tokenizer(text, return_tensors="pt")["input_ids"][0]
+
+    # keep the first ppl_tokens, cut into non-overlapping rows of ppl_window -> [n, window]
+    windows = tokens[: cfg.ppl_tokens].reshape(-1, cfg.ppl_window)
+
+    # saves so the next run skips the download + tokenizing
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(windows, cache_path)
+
+    return windows
 
 
 def window_losses(model, windows, batch_size=4) -> torch.Tensor:
     """Mean next-token loss per window. Perplexity = exp(mean of these)."""
-    raise NotImplementedError
+    losses = []
+
+    with torch.no_grad():
+        # batches of windows, all 16 at once would be 3+ GB of logits
+        for i in range(0, len(windows), batch_size):
+            batch = windows[i: i + batch_size].to(model.cfg.device)
+
+            # loss at every position -> [batch, window - 1] (last token has nothing to predict)
+            per_token = model(batch, return_type="loss", loss_per_token=True)
+
+            # avg over positions, one loss per window -> [batch]
+            losses.append(per_token.mean(dim=1))
+
+    # all windows -> [n]
+    return torch.cat(losses)
 
 
 # ---------- behaviour: IOI ----------
