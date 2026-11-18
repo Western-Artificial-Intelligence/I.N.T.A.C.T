@@ -14,19 +14,22 @@ torch.set_grad_enabled(False)
 @pytest.fixture(scope="session")
 def tok():
     """GPT2TokenizerFast for "gpt2"."""
-    raise NotImplementedError
+    from transformers import GPT2TokenizerFast
+    return GPT2TokenizerFast.from_pretrained("gpt2")
 
 
 @pytest.fixture(scope="session")
 def base_hf():
     """GPT2LMHeadModel "gpt2" in eval mode (unrounded)."""
-    raise NotImplementedError
+    from transformers import GPT2LMHeadModel
+    return GPT2LMHeadModel.from_pretrained("gpt2").eval()
 
 
 @pytest.fixture(scope="session")
 def fp_model(base_hf, tok):
     """base_hf loaded into TransformerLens with quantize.load_tl."""
-    raise NotImplementedError
+    from quantize import load_tl
+    return load_tl(base_hf, tok)
 
 
 @pytest.fixture(scope="session")
