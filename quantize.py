@@ -11,8 +11,12 @@ Scales always come from the full weight matrix; a scope mask then decides which 
 That way "circuit-only" + "everything-but-circuit" partition exactly the same rounded numbers as "all".
 """
 
+import copy
+
 import torch
 from transformer_lens import HookedTransformer
+
+from config import Config
 
 D_HEAD = 64
 LINEARS = ["attn.c_attn", "attn.c_proj", "mlp.c_fc", "mlp.c_proj"]
@@ -23,7 +27,10 @@ def rtn(w: torch.Tensor, bits: int):
 
     HF Conv1D weights are [in, out], so a channel is a column: qmax = 2^(bits-1) - 1, scale = max|column| / qmax.
     """
-    raise NotImplementedError
+    qmax = 2 ** (bits - 1) - 1
+    scale = w.abs().amax(dim=0, keepdim=True) / qmax
+    scale = scale.clamp_min(torch.finfo(w.dtype).tiny)  # an all-zero column would otherwise divide by zero
+    return (w / scale).round().clamp(-qmax, qmax) * scale, scale
 
 
 def head_masks(layer: int, heads: list, shapes: dict) -> dict:
@@ -51,14 +58,25 @@ def quantize_hf(hf_model, bits, scope="all", control="rtn", results_dir="results
     control: "rtn" = real rounding; "noise" = Gaussian error with the same per-channel RMS as rounding;
     "signflip" = the rounding error with random signs. Only masked entries change (see scope_heads).
     """
-    raise NotImplementedError
+    if scope != "all" or control != "rtn":
+        raise NotImplementedError("only scope='all', control='rtn' so far")
+    model = copy.deepcopy(hf_model)
+    if bits is None:
+        return model
+    for block in model.transformer.h:
+        for name in LINEARS:
+            weight = block.get_submodule(name).weight
+            weight.copy_(rtn(weight, bits)[0])
+    return model
 
 
 def load_tl(hf_model, tokenizer, device="cpu") -> HookedTransformer:
     """Load a (possibly rounded) HF model into TransformerLens as "gpt2", in eval mode."""
-    raise NotImplementedError
+    return HookedTransformer.from_pretrained("gpt2", hf_model=hf_model, tokenizer=tokenizer, device=device).eval()
 
 
 def build_model(base_hf, tokenizer, bits, scope="all", control="rtn", cfg=None) -> HookedTransformer:
     """A fresh model for one condition of the sweep: quantize_hf, then load_tl."""
-    raise NotImplementedError
+    cfg = cfg or Config()
+    hf_model = quantize_hf(base_hf, bits, scope, control, cfg.results_dir, cfg.seed)
+    return load_tl(hf_model, tokenizer, cfg.device)
