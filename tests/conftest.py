@@ -38,4 +38,6 @@ def data(tok):
 @pytest.fixture(scope="session")
 def ind():
     """A small induction set: make_induction(4, 20, seed=0)."""
-    raise NotImplementedError
+    from tasks import make_induction
+
+    return make_induction(4, 20, seed=0)
