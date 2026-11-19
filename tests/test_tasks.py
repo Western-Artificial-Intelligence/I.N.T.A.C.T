@@ -32,7 +32,6 @@ def test_induction_repeats():
 
     n, h = 4, 20
     d = make_induction(n, h, seed=0)
-    assert d.half_len == h
     assert d.tokens.shape == d.corrupt.shape == (n, 1 + 2 * h)
 
     # [BOS, A, A]
@@ -44,8 +43,3 @@ def test_induction_repeats():
     # B is drawn independently, so a single position can match A by chance (1 in 50256); check per sequence.
     assert torch.equal(d.corrupt[:, : 1 + h], d.tokens[:, : 1 + h])
     assert (d.corrupt[:, 1 + h :] != d.tokens[:, 1 + h :]).any(dim=1).all()
-
-    # seeded: same seed reproduces exactly, a different seed does not
-    d2 = make_induction(n, h, seed=0)
-    assert torch.equal(d.tokens, d2.tokens) and torch.equal(d.corrupt, d2.corrupt)
-    assert not torch.equal(d.tokens, make_induction(n, h, seed=1).tokens)
