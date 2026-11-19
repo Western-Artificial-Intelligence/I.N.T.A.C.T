@@ -133,9 +133,16 @@ def crossing(s, thr, use_ci=False):
     return int(below["bits"].iloc[0]) if len(below) else None
 
 
+def save_table(df, results_dir) -> Path:
+    """Write the normalized table to <results_dir>/normalized.csv and return that path."""
+    path = Path(results_dir) / "normalized.csv"
+    df.to_csv(path, index=False)
+    return path
+
+
 def bit_label(b) -> str:
     """32 -> "FP32", otherwise "INT<b>"."""
-    raise NotImplementedError
+    return "FP32" if int(b) == 32 else f"INT{int(b)}"
 
 
 # ---------- figures (all saved to <results_dir>/figures/) ----------
