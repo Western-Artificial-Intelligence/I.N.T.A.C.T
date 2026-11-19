@@ -14,7 +14,8 @@ torch.set_grad_enabled(False)
 @pytest.fixture(scope="session")
 def tok():
     """GPT2TokenizerFast for "gpt2"."""
-    raise NotImplementedError
+    from transformers import GPT2TokenizerFast
+    return GPT2TokenizerFast.from_pretrained("gpt2")
 
 
 @pytest.fixture(scope="session")
@@ -32,7 +33,8 @@ def fp_model(base_hf, tok):
 @pytest.fixture(scope="session")
 def data(tok):
     """A small IOI set: make_ioi(tok, n_per_template=1, seed=0)."""
-    raise NotImplementedError
+    from tasks import make_ioi
+    return make_ioi(tok, n_per_template=1, seed=0)
 
 
 @pytest.fixture(scope="session")
