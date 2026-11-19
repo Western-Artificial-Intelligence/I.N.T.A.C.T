@@ -26,4 +26,26 @@ def test_names_are_single_tokens(tok):
 
 def test_induction_repeats():
     """tokens = [BOS, A, A]; corrupt matches tokens up to the end of the first A, then differs."""
-    raise NotImplementedError
+    import torch
+
+    from tasks import BOS, make_induction
+
+    n, h = 4, 20
+    d = make_induction(n, h, seed=0)
+    assert d.half_len == h
+    assert d.tokens.shape == d.corrupt.shape == (n, 1 + 2 * h)
+
+    # [BOS, A, A]
+    assert (d.tokens[:, 0] == BOS).all() and (d.corrupt[:, 0] == BOS).all()
+    assert torch.equal(d.tokens[:, 1 : 1 + h], d.tokens[:, 1 + h :])
+    assert not (d.tokens[:, 1:] == BOS).any() and not (d.corrupt[:, 1:] == BOS).any()
+
+    # corrupt = [BOS, A, B]: same up to the end of the first A, then the second half no longer repeats.
+    # B is drawn independently, so a single position can match A by chance (1 in 50256); check per sequence.
+    assert torch.equal(d.corrupt[:, : 1 + h], d.tokens[:, : 1 + h])
+    assert (d.corrupt[:, 1 + h :] != d.tokens[:, 1 + h :]).any(dim=1).all()
+
+    # seeded: same seed reproduces exactly, a different seed does not
+    d2 = make_induction(n, h, seed=0)
+    assert torch.equal(d.tokens, d2.tokens) and torch.equal(d.corrupt, d2.corrupt)
+    assert not torch.equal(d.tokens, make_induction(n, h, seed=1).tokens)

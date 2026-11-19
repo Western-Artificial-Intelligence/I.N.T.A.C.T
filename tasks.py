@@ -63,4 +63,15 @@ def make_ioi(tokenizer, n_per_template: int, seed: int) -> IOIData:
 
 def make_induction(n: int, half_len: int, seed: int, d_vocab: int = 50257) -> InductionData:
     """n sequences of [BOS, A, A] with A = half_len random tokens, plus a corrupt [BOS, A, B] twin (B fresh)."""
-    raise NotImplementedError
+    g = torch.Generator().manual_seed(seed)
+    # Every random token is uniform over IDs 0..d_vocab-2, i.e. the whole vocab except BOS (the last ID).
+    # A BOS mid-sequence would act as a fresh start and break the copying the induction task relies on.
+    vocab = d_vocab - 1
+    a = torch.randint(0, vocab, (n, half_len), generator=g)
+    b = torch.randint(0, vocab, (n, half_len), generator=g)
+    bos = torch.full((n, 1), BOS, dtype=a.dtype)
+    return InductionData(
+        tokens=torch.cat([bos, a, a], dim=1),
+        corrupt=torch.cat([bos, a, b], dim=1),
+        half_len=half_len,
+    )
