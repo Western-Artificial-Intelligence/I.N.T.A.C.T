@@ -87,6 +87,37 @@ def induction_scores(model, tokens: torch.Tensor, half_len: int) -> tuple[torch.
     return induction_score_res, prev_token_score_res
 
 
+def _pick_heads(ind_score_res, prev_token_score_res, ind_cutoff: float, prev_cutoff: float) -> dict:
+    """The selection rules on already-computed [L, H] scores. Both lists empty if no head beats ind_cutoff.
+
+    Shared by select_induction_circuit and threshold_sensitivity so both pick heads the exact same way.
+    """
+    # stores layers and heads which are greater than the threshold
+    ind_heads = []
+
+    # filters inductions scores through the threshold and saves the layer, head in ind_heads
+    for layer, head in ALL_HEADS:
+        if ind_score_res[layer, head] > ind_cutoff:
+            ind_heads.append((layer, head))
+
+    # no induction heads means no deepest layer, so no prev-token heads either
+    if not ind_heads:
+        return {"previous token": [], "induction": []}
+    max_layer = max(layer for layer, _ in ind_heads)
+
+    # stores previous-token heads that pass all three checks
+    prev_token_heads = []
+
+    for layer, head in ALL_HEADS:
+        # checks if it matches three conditions before appending to list
+        if (prev_token_score_res[layer, head] > prev_cutoff
+                and layer < max_layer
+                and (layer, head) not in ind_heads):
+            prev_token_heads.append((layer, head))
+
+    return {"previous token": prev_token_heads, "induction": ind_heads}
+
+
 def select_induction_circuit(model, tokens, cfg) -> dict:
     """{"previous token": [...], "induction": [...]} chosen by score on the FP model.
 
@@ -96,36 +127,70 @@ def select_induction_circuit(model, tokens, cfg) -> dict:
     # gets scores
     ind_score_res, prev_token_score_res = induction_scores(model, tokens, cfg.induction_half_len)
 
-    # stores layers and heads which are greater than the threshold
-    ind_heads = []
+    res = _pick_heads(ind_score_res, prev_token_score_res,
+                      cfg.induction_score_threshold, cfg.prev_token_score_threshold)
 
-    # filters inductions scores through the threshold and saves the layer, head in ind_heads
-    for layer, head in ALL_HEADS:
-        if ind_score_res[layer, head] > cfg.induction_score_threshold:
-            ind_heads.append((layer, head))
-
-    # grabs the deepest layer if ind heads is not empty
-    if not ind_heads:
+    if not res["induction"]:
         raise ValueError("no head beat induction_score_threshold, lower it in config.py")
-    max_layer = max(layer for layer, _ in ind_heads)
-
-    # stores previous-token heads that pass all three checks
-    prev_token_heads = []
-
-    for layer, head in ALL_HEADS:
-        # checks if it matches three conditions before appending to list
-        if (prev_token_score_res[layer, head] > cfg.prev_token_score_threshold
-                and layer < max_layer
-                and (layer, head) not in ind_heads):
-            prev_token_heads.append((layer, head))
-
-    # stores result in dict
-    res = {
-        "previous token": prev_token_heads,
-        "induction": ind_heads
-    }
 
     return res
+
+
+def _head_name(head) -> str:
+    """(7, 10) -> "7.10", for printing."""
+    return f"{head[0]}.{head[1]}"
+
+
+def threshold_sensitivity(model, tokens, cfg, delta: float = 0.1) -> dict:
+    """Which heads get picked with each cutoff moved delta below / above its chosen value (ticket #8).
+
+    Induction (copying) cutoff and previous-token cutoff are moved one at a time; the other stays at its chosen value.
+    Borderline heads = picked at some cutoffs in the range but not all of them, i.e. the ones a copying result should
+    be re-checked with and without. Prints the table and returns it as a JSON-ready dict.
+    """
+    # same scores the real pick uses
+    ind_score_res, prev_token_score_res = induction_scores(model, tokens, cfg.induction_half_len)
+
+    sweeps = [
+        ("induction", ind_score_res, cfg.induction_score_threshold),
+        ("previous token", prev_token_score_res, cfg.prev_token_score_threshold),
+    ]
+
+    report = {"delta": delta}
+
+    for cls, scores, chosen in sweeps:
+        picks = {}
+
+        for cutoff in (chosen - delta, chosen, chosen + delta):
+            cutoff = round(cutoff, 4)  # 0.7 - 0.1 would otherwise be 0.6000000000000001
+            # only move this class's cutoff, keep the other one at its chosen value
+            ind_cutoff = cutoff if cls == "induction" else cfg.induction_score_threshold
+            prev_cutoff = cutoff if cls == "previous token" else cfg.prev_token_score_threshold
+            picks[cutoff] = _pick_heads(ind_score_res, prev_token_score_res, ind_cutoff, prev_cutoff)[cls]
+
+        # in at some cutoff but not at all of them -> borderline
+        picked_ever = set().union(*picks.values())
+        picked_always = set.intersection(*(set(heads) for heads in picks.values()))
+        borderline = sorted(picked_ever - picked_always)
+
+        report[cls] = {
+            "chosen_cutoff": chosen,
+            "picks": {f"{c:.2f}": [list(h) for h in heads] for c, heads in picks.items()},
+            "borderline": [{"head": list(h), "score": round(float(scores[h[0], h[1]]), 4)} for h in borderline],
+            "stable": not borderline,
+        }
+
+        # prints the table
+        print(f"{cls} cutoff (chosen {chosen:.2f}):")
+        for c, heads in picks.items():
+            print(f"  {c:.2f}: {' '.join(_head_name(h) for h in heads) or '(none)'}")
+        if borderline:
+            names = ", ".join(f"{_head_name(h)} ({float(scores[h[0], h[1]]):.2f})" for h in borderline)
+            print(f"  borderline: {names}")
+        else:
+            print("  stable: same heads across the whole range")
+
+    return report
 
 
 def save_induction_circuit(circuit: dict, results_dir: str):
@@ -151,6 +216,15 @@ def load_induction_circuit(results_dir: str) -> dict:
             res[cls].append(tuple(h))
 
     return res
+
+
+def save_threshold_sensitivity(report: dict, results_dir: str):
+    """Write threshold_sensitivity's report to <results_dir>/induction_thresholds.json, next to induction_heads.json."""
+    # creates folder if it does not exist
+    Path(results_dir).mkdir(parents=True, exist_ok=True)
+
+    with open(Path(results_dir) / "induction_thresholds.json", "w", encoding="utf-8") as file:
+        json.dump(report, file, indent=2)
 
 
 def random_heads(n: int, exclude: list, seed: int) -> list:
