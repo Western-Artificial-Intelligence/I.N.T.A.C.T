@@ -7,7 +7,12 @@ Every number is normalized to FP32 (1.0 = unchanged). CIs are paired bootstraps 
 prompts for the condition and for FP32).
 """
 
+import json
+from pathlib import Path
+
 import matplotlib
+import numpy as np
+import pandas as pd
 
 matplotlib.use("Agg")
 
@@ -24,7 +29,7 @@ LEVEL = {"perplexity": "benchmark", "IOI logit diff": "behaviour", "IOI accuracy
          "induction gain": "behaviour", "IOI faithfulness": "circuit", "IOI circuit patching": "circuit",
          "name-mover direct effect": "circuit", "induction circuit patching": "circuit"}
 
-# TODO: one function per metric name in LEVEL, f(P, I) -> value. P = per-prompt arrays from one condition;
+# One function per metric name in LEVEL, f(P, I) -> value. P = per-prompt arrays from one condition;
 # I = None for the point estimate, or {task: [B, n] resample indices} for the bootstrap. Formulas:
 #   perplexity                  1 / ppl, so the ratio to FP32 reads "fraction of FP32 quality"
 #   IOI logit diff / accuracy   mean of ("ioi", "logit_diff") / ("ioi", "correct")
@@ -33,7 +38,31 @@ LEVEL = {"perplexity": "benchmark", "IOI logit diff": "behaviour", "IOI accuracy
 #   name-mover direct effect    mean ("ioi", "dla:name mover")
 #   induction gain              lp_second - lp_first
 #   induction circuit patching  (lp_circuit_patch - lp_corrupt) / (lp_second - lp_corrupt)
-METRICS: dict = {}
+def _mean(P, I, task, metric):
+    """Mean over prompts of one per-prompt array: a float, or [B] means (one per resample) when I is given."""
+    x = P[(task, metric)]
+    return x.mean() if I is None else x[I[task]].mean(axis=1)
+
+
+def _recovery(P, I, task, patched, clean, corrupt):
+    """Share of the clean-vs-corrupt gap that patching the circuit restores."""
+    floor = _mean(P, I, task, corrupt)
+    return (_mean(P, I, task, patched) - floor) / (_mean(P, I, task, clean) - floor)
+
+
+METRICS: dict = {
+    "perplexity": lambda P, I: 1 / np.exp(_mean(P, I, "ppl", "window_loss")),
+    "IOI logit diff": lambda P, I: _mean(P, I, "ioi", "logit_diff"),
+    "IOI accuracy": lambda P, I: _mean(P, I, "ioi", "correct"),
+    "induction gain": lambda P, I: _mean(P, I, "induction", "lp_second") - _mean(P, I, "induction", "lp_first"),
+    "IOI faithfulness": lambda P, I: _mean(P, I, "ioi", "ld_faith") / _mean(P, I, "ioi", "logit_diff"),
+    "IOI circuit patching": lambda P, I: _recovery(P, I, "ioi", "ld_circuit_patch", "logit_diff", "ld_corrupt"),
+    "name-mover direct effect": lambda P, I: _mean(P, I, "ioi", "dla:name mover"),
+    "induction circuit patching": lambda P, I: _recovery(P, I, "induction", "lp_circuit_patch", "lp_second",
+                                                         "lp_corrupt"),
+}
+
+FP32 = "fp32"  # the reference condition's folder name
 
 
 # ---------- loading ----------
@@ -41,7 +70,26 @@ METRICS: dict = {}
 def load(results_dir) -> dict:
     """{condition: {"meta": summary.json, "P": {(task, metric): array}, "H": {metric: [L, H] array}}} for every
     finished condition under <results_dir>/raw."""
-    raise NotImplementedError
+    conds = {}
+    for summary in sorted((Path(results_dir) / "raw").glob("*/summary.json")):  # no summary.json = not finished
+        d = summary.parent
+        prompts = pd.read_csv(d / "prompts.csv").sort_values("idx")
+        P = {key: g["value"].to_numpy(dtype=float) for key, g in prompts.groupby(["task", "metric"])}
+        heads = pd.read_csv(d / "heads.csv")
+        H = {m: g.pivot(index="layer", columns="head", values="value").to_numpy(dtype=float)
+             for m, g in heads.groupby("metric")}
+        conds[d.name] = {"meta": json.loads(summary.read_text()), "P": P, "H": H}
+    return conds
+
+
+def _setting(name, meta):
+    """(bits, scope, control) of a condition: from its meta if run_sweep saved them, otherwise from its name
+    ("b4_circuit-ioi_rtn"). FP32 counts as 32 bits."""
+    if name == FP32:
+        return 32, "all", "rtn"
+    b, *scope, control = name.split("_")  # the scope itself may contain "_" (random_heads)
+    return (int(meta.get("bits") or b[1:]), meta.get("scope") or "_".join(scope).replace("-", ":"),
+            meta.get("control") or control)
 
 
 # ---------- numbers ----------
@@ -52,22 +100,49 @@ def normalized_table(conds):
     value = metric / FP32 metric; lo, hi = 2.5 / 97.5 percentiles of the paired bootstrap (same resampled prompts
     for the condition and FP32; fixed rng seed).
     """
-    raise NotImplementedError
+    fp = conds[FP32]["P"]
+    rng = np.random.default_rng(0)
+    # one set of resampled prompt indices per task, shared by every condition and by FP32 (that is the pairing)
+    I = {}
+    for task, metric in sorted(fp):
+        if task not in I:
+            n = len(fp[(task, metric)])
+            I[task] = rng.integers(0, n, size=(B, n))
+
+    rows = []
+    for name, cond in conds.items():
+        bits, scope, control = _setting(name, cond["meta"])
+        for metric, f in METRICS.items():
+            value = f(cond["P"], None) / f(fp, None)
+            lo, hi = np.percentile(f(cond["P"], I) / f(fp, I), [2.5, 97.5])
+            rows.append({"condition": name, "bits": bits, "scope": scope, "control": control, "metric": metric,
+                         "level": LEVEL[metric], "value": value, "lo": lo, "hi": hi})
+    df = pd.DataFrame(rows)
+    return df.sort_values(["bits", "condition"], ascending=[False, True], kind="stable", ignore_index=True)
 
 
 def series(df, metric, scope="all", control="rtn"):
     """One metric across precisions, FP32 first, then falling bits."""
-    raise NotImplementedError
+    keep = (df["metric"] == metric) & ((df["condition"] == FP32) | ((df["scope"] == scope) & (df["control"] == control)))
+    return df[keep].sort_values("bits", ascending=False, ignore_index=True)
 
 
 def crossing(s, thr, use_ci=False):
     """First bits where the value (or the whole CI, if use_ci) drops below thr; None if never."""
-    raise NotImplementedError
+    below = s[s["hi" if use_ci else "value"] < thr]  # the whole CI is below thr when its upper end is
+    return int(below["bits"].iloc[0]) if len(below) else None
+
+
+def save_table(df, results_dir) -> Path:
+    """Write the normalized table to <results_dir>/normalized.csv and return that path."""
+    path = Path(results_dir) / "normalized.csv"
+    df.to_csv(path, index=False)
+    return path
 
 
 def bit_label(b) -> str:
     """32 -> "FP32", otherwise "INT<b>"."""
-    raise NotImplementedError
+    return "FP32" if int(b) == 32 else f"INT{int(b)}"
 
 
 # ---------- figures (all saved to <results_dir>/figures/) ----------
