@@ -63,29 +63,41 @@ def window_losses(model, windows, batch_size=4) -> torch.Tensor:
 
 def end_logits(logits, data) -> torch.Tensor:
     """[N, vocab]: each prompt's logits at its own last real token (data.pos["end"]), skipping padding."""
-    raise NotImplementedError
+    return logits[torch.arange(len(data)), data.pos["end"]]
 
 
 def logit_diff(logits, data) -> torch.Tensor:
     """logit(IO) - logit(S) at the last position. Positive = model prefers the right name."""
-    raise NotImplementedError
+    end = end_logits(logits, data)
+    return end.gather(1, data.io[:, None])[:, 0] - end.gather(1, data.s[:, None])[:, 0]
 
 
 def ioi_behaviour(logits, data) -> dict:
     """Per prompt: {"logit_diff", "correct" (logit_diff > 0), "top1" (argmax == IO), "io_prob"}."""
-    raise NotImplementedError
+    end = end_logits(logits, data)
+    ld = logit_diff(logits, data)
+    return {
+        "logit_diff": ld,
+        "correct": (ld > 0).float(),
+        "top1": (end.argmax(-1) == data.io).float(),
+        "io_prob": end.softmax(-1).gather(1, data.io[:, None])[:, 0],
+    }
 
 
 # ---------- behaviour: induction ----------
 
 def next_token_logprobs(logits, tokens) -> torch.Tensor:
     """[N, 2T]: log-prob that position p assigns to token p+1."""
-    raise NotImplementedError
+    return logits[:, :-1].log_softmax(-1).gather(-1, tokens[:, 1:, None])[..., 0]
 
 
 def induction_logprob(logits, ind) -> dict:
     """Mean log-prob of the clean next token on the repeated half ("lp_second") and the first half ("lp_first")."""
-    raise NotImplementedError
+    T = ind.half_len
+    lp = next_token_logprobs(logits, ind.tokens)
+    # Sequence is [BOS, A (1..T), A (T+1..2T)]. Position T+1 onward can copy; position T can't (the repeat
+    # hasn't started yet), and position 0 (BOS -> first token) is a blind guess, so both are left out.
+    return {"lp_second": lp[:, T + 1: 2 * T].mean(1), "lp_first": lp[:, 1:T].mean(1)}
 
 
 # ---------- per-head readouts ----------
