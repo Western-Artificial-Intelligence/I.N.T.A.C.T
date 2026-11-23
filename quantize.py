@@ -16,6 +16,8 @@ import copy
 import torch
 from transformer_lens import HookedTransformer
 
+from config import Config
+
 D_HEAD = 64
 LINEARS = ["attn.c_attn", "attn.c_proj", "mlp.c_fc", "mlp.c_proj"]
 
@@ -78,6 +80,7 @@ def load_tl(hf_model, tokenizer, device="cpu") -> HookedTransformer:
 
 def build_model(base_hf, tokenizer, bits, scope="all", control="rtn", cfg=None) -> HookedTransformer:
     """A fresh model for one condition of the sweep: quantize_hf, then load_tl."""
+    cfg = cfg or Config()
     hf = quantize_hf(base_hf, bits, scope, control, cfg.results_dir, cfg.seed)
     model = load_tl(hf, tokenizer, cfg.device)
     del hf  # TransformerLens made its own copy of the weights
