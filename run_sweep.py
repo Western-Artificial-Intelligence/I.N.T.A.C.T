@@ -12,6 +12,9 @@ from pathlib import Path
 
 os.environ.setdefault("TQDM_DISABLE", "1")
 
+from circuits import (load_induction_circuit, save_induction_circuit, save_threshold_sensitivity,  # noqa: E402
+                      select_induction_circuit, threshold_sensitivity)
+
 
 def setup(cfg):
     """Seed + deterministic torch + no grad; load GPT-2 tokenizer and HF model; build IOI data, induction data and
@@ -21,7 +24,29 @@ def setup(cfg):
 
 def induction_circuit(fp_model, ind, cfg) -> dict:
     """Selected once on the FP model, then frozen to disk so every condition watches the same heads."""
-    raise NotImplementedError
+    heads_file = Path(cfg.results_dir) / "induction_heads.json"
+    report_file = Path(cfg.results_dir) / "induction_thresholds.json"
+
+    # already picked on an earlier run -> reuse that exact list, never re-pick
+    picked_now = not heads_file.exists()
+    if picked_now:
+        # first run: pick on the FP model and freeze it to disk
+        circuit = select_induction_circuit(fp_model, ind.tokens, cfg)
+        save_induction_circuit(circuit, cfg.results_dir)
+        print(f"induction circuit: picked on FP32 and saved to {heads_file}")
+    else:
+        circuit = load_induction_circuit(cfg.results_dir)
+        print(f"induction circuit: loaded from {heads_file}")
+
+    # +-0.1 cutoff report (#8), saved next to the list. Made with every new pick, and also for results folders that
+    # have a list but no report yet
+    if picked_now or not report_file.exists():
+        report = threshold_sensitivity(fp_model, ind.tokens, cfg)
+        save_threshold_sensitivity(report, cfg.results_dir)
+        print(f"cutoff report saved to {report_file}")
+
+    print(f"  induction: {circuit['induction']}  previous token: {circuit['previous token']}")
+    return circuit
 
 
 def measure_condition(model, data, ind, windows, ind_circuit, fp_head_out=None, head_map=False):
