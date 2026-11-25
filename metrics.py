@@ -7,6 +7,8 @@ from pathlib import Path
 import torch
 from datasets import load_dataset
 
+from circuits import N_HEADS, N_LAYERS
+
 
 # ---------- benchmark: perplexity ----------
 
@@ -137,7 +139,24 @@ def template_means(model, data, tokens) -> dict:
 
     Call it on data.abc so the mean carries no IOI signal.
     """
-    raise NotImplementedError
+    with torch.no_grad():
+        # only keep hook_z (each head's output before W_O), the rest of the cache isn't needed
+        _, cache = model.run_with_cache(tokens.to(model.cfg.device),
+                                        names_filter=lambda name: name.endswith("attn.hook_z"))
+
+    means = {}
+    for layer in range(model.cfg.n_layers):
+        z = cache["z", layer]  # [N, T, H, d_head]
+        mean = torch.empty_like(z)
+
+        # prompts of one template share every position, so averaging over them lines up token for token
+        for t in data.template.unique():
+            rows = (data.template == t).to(z.device)
+            mean[rows] = z[rows].mean(dim=0, keepdim=True)  # one average, copied back to every prompt of t
+
+        means[layer] = mean
+
+    return means
 
 
 def keep_mask(data, circuit: dict, keep_position: dict, seq_len: int) -> dict:
@@ -145,14 +164,44 @@ def keep_mask(data, circuit: dict, keep_position: dict, seq_len: int) -> dict:
 
     A circuit head is kept only at its class's KEEP_POSITION; every non-circuit head is ablated everywhere.
     """
-    raise NotImplementedError
+    n = len(data)
+    rows = torch.arange(n)
+
+    # start with every head ablated at every position
+    keep = {layer: torch.zeros(n, seq_len, N_HEADS, dtype=torch.bool) for layer in range(N_LAYERS)}
+
+    # turn each circuit head back on, but only at the one position where its class does its job
+    for cls, heads in circuit.items():
+        positions = data.pos[keep_position[cls]]  # [N], one position per prompt
+        for layer, head in heads:
+            keep[layer][rows, positions, head] = True
+
+    return keep
 
 
 def mean_ablation_hooks(keep: dict, means: dict) -> list:
     """TransformerLens fwd_hooks on blocks.{l}.attn.hook_z: z where keep is True, the template mean elsewhere."""
-    raise NotImplementedError
+
+    def make_hook(layer):
+        def hook(z, hook):
+            # [N, T, H] -> [N, T, H, 1] so it broadcasts over d_head
+            k = keep[layer].to(z.device)[..., None]
+            return torch.where(k, z, means[layer].to(z.device))
+
+        return hook
+
+    return [(f"blocks.{layer}.attn.hook_z", make_hook(layer)) for layer in keep]
 
 
 def ablate_heads_mask(data, heads: list, seq_len: int) -> dict:
     """Keep everything except `heads`, which are mean-ablated at every position."""
-    raise NotImplementedError
+    n = len(data)
+
+    # start with every head kept at every position
+    keep = {layer: torch.ones(n, seq_len, N_HEADS, dtype=torch.bool) for layer in range(N_LAYERS)}
+
+    # switch off the given heads everywhere
+    for layer, head in heads:
+        keep[layer][:, :, head] = False
+
+    return keep
