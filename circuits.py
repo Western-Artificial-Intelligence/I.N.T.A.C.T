@@ -9,7 +9,10 @@ from pathlib import Path
 
 import torch
 
-# TODO: fill from Wang et al. 2022, "Interpretability in the Wild" (26 heads in 7 classes; ARENA lists them).
+# Wang et al. 2022, "Interpretability in the Wild" (arXiv 2211.00593): 26 heads in 7 classes. Second check done
+# for #35: every head and class matches the paper's Appendix K table (Figure 20) and ARENA 3.0's IOI `CIRCUIT`.
+# Order within a class doesn't matter (heads_of sorts). Induction 5.8 and 5.9 are the paper's "fuzzy" induction
+# heads (Appendix C), and duplicate token 0.10 is its "fuzzy" duplicate token head; both are in the 26.
 IOI_CIRCUIT = {
     "name mover": [(9, 9), (9, 6), (10, 0)],  # 3 heads
     "backup name mover": [(10, 10), (10, 6), (10, 2), (10, 1), (11, 2), (9, 7), (9, 0), (11, 9)],  # 8 heads
@@ -20,7 +23,7 @@ IOI_CIRCUIT = {
     "previous token": [(2, 2), (4, 11)],  # 2 heads
 }
 
-# TODO: where each class does its job ("end", "S2" or "S1+1"; ARENA / Wang et al. convention). When we mean-ablate
+# Where each class does its job (matches ARENA 3.0's IOI `SEQ_POS_TO_KEEP`; checked in #35). When we mean-ablate
 # everything outside the circuit, a circuit head keeps its real output only at this position.
 KEEP_POSITION = {
     "name mover": "end",
