@@ -21,9 +21,17 @@ class Config:
     controls: tuple = ("rtn", "noise", "signflip")  # run at scope "all" only
     scopes: tuple = ("circuit:ioi", "rest:ioi", "random_heads", "circuit:induction", "rest:induction")
 
-    # Induction circuit selection on the FP model.
-    # TODO: pick these by printing every head's score on FP32 and putting the cut in the clear gap between real
-    # induction heads and late copying heads (e.g. the IOI name movers also score on repeated text).
+    # Induction circuit selection on the FP model. Decided in #34 from the scores on FP32 GPT-2 (32 sequences,
+    # half_len 50):
+    #   induction:      5.5 .94, 6.9 .92, 5.1 .91, 7.10 .91, 7.2 .83 | 10.1 .52, 9.6 .52, 9.9 .49, 10.7 .47, ...
+    #                   0.7 sits in the clear gap (the late hits are IOI name movers); the same 5 heads are picked
+    #                   anywhere in 0.6-0.8.
+    #   previous token: 4.11 .99 | 3.7 .54, 6.8 .51, 2.2 .49, 5.6 .42, 3.2 .41 | 2.9 .37, 3.8 .36, 2.5 .35, ...
+    #                   No clear gap below 4.11. We keep 0.4 (6 heads: 2.2, 3.2, 3.7, 4.11, 5.6, 6.8) because it
+    #                   gives the 6 previous-token heads PREDICTIONS.md recorded before the pilot; moving the cutoff
+    #                   after seeing the scores would be tuning the circuit H2 is about. The pick changes inside
+    #                   0.3-0.5, so PREDICTIONS.md also reports the induction results with 4.11 alone (0.7, the
+    #                   only clear gap) as a sensitivity check.
     induction_score_threshold: float = 0.7
     prev_token_score_threshold: float = 0.4
 

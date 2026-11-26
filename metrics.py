@@ -5,7 +5,10 @@ Every IOI function returns one value per prompt so analyze.py can bootstrap over
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from datasets import load_dataset
+
+from circuits import N_HEADS, N_LAYERS
 
 
 # ---------- benchmark: perplexity ----------
@@ -104,30 +107,58 @@ def induction_logprob(logits, ind) -> dict:
 
 def head_outputs_at(model, cache, positions) -> torch.Tensor:
     """What each head writes into the residual stream at one position per prompt: [L, H, N, d_model] (z @ W_O)."""
-    raise NotImplementedError
+    outputs = []
+    for layer, block in enumerate(model.blocks):
+        z = cache["z", layer]
+        rows = torch.arange(len(positions), device=z.device)
+        end_z = z[rows, positions.to(z.device)]
+        outputs.append(torch.einsum("nhd,hdm->hnm", end_z, block.attn.W_O))
+    return torch.stack(outputs)
 
 
 def direct_logit_attribution(model, cache, data, head_out=None) -> torch.Tensor:
     """[L, H, N]: how much each head pushes logit(IO) - logit(S).
 
-    = head output / ln_final scale at the end position, dotted with W_U[:, IO] - W_U[:, S].
+    Uses the final LayerNorm scale at each prompt's end and the IO-minus-S unembedding direction.
     """
-    raise NotImplementedError
+    if head_out is None:
+        head_out = head_outputs_at(model, cache, data.pos["end"])
+
+    scale = cache["ln_final.hook_scale"]
+    rows = torch.arange(len(data), device=scale.device)
+    end_scale = scale[rows, data.pos["end"].to(scale.device), 0]
+
+    unembed = model.W_U
+    direction = unembed[:, data.io.to(unembed.device)] - unembed[:, data.s.to(unembed.device)]
+    # Centering the direction accounts for LayerNorm's mean subtraction on each head output.
+    direction = direction - direction.mean(dim=0, keepdim=True)
+    return torch.einsum("lhnm,mn->lhn", head_out, direction) / end_scale
 
 
 def attention_to(cache, data, key: str) -> torch.Tensor:
     """[L, H]: mean attention from the last position to data.pos[key] (e.g. name movers -> IO)."""
-    raise NotImplementedError
+    attention = []
+    for layer in range(cache.model.cfg.n_layers):
+        pattern = cache["pattern", layer].permute(0, 2, 3, 1)  # [prompt, query, key, head]
+        rows = torch.arange(len(data), device=pattern.device)
+        query = data.pos["end"].to(pattern.device)
+        target = data.pos[key].to(pattern.device)
+        attention.append(pattern[rows, query, target].mean(dim=0))
+    return torch.stack(attention)
 
 
 def class_sums(dla: torch.Tensor, circuit: dict) -> dict:
     """Per-prompt total DLA of each class of the circuit: {class: [N]}."""
-    raise NotImplementedError
+    totals = {}
+    for name, heads in circuit.items():
+        indices = torch.tensor(heads, dtype=torch.long, device=dla.device).reshape(-1, 2)
+        totals[name] = dla[indices[:, 0], indices[:, 1]].sum(dim=0)
+    return totals
 
 
 def cosine_per_head(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """[L, H]: mean over prompts of cos(head output in model a, head output in model b)."""
-    raise NotImplementedError
+    return F.cosine_similarity(a, b, dim=-1).mean(dim=-1)
 
 
 # ---------- circuit-level: mean ablation and faithfulness ----------
@@ -137,7 +168,24 @@ def template_means(model, data, tokens) -> dict:
 
     Call it on data.abc so the mean carries no IOI signal.
     """
-    raise NotImplementedError
+    with torch.no_grad():
+        # only keep hook_z (each head's output before W_O), the rest of the cache isn't needed
+        _, cache = model.run_with_cache(tokens.to(model.cfg.device),
+                                        names_filter=lambda name: name.endswith("attn.hook_z"))
+
+    means = {}
+    for layer in range(model.cfg.n_layers):
+        z = cache["z", layer]  # [N, T, H, d_head]
+        mean = torch.empty_like(z)
+
+        # prompts of one template share every position, so averaging over them lines up token for token
+        for t in data.template.unique():
+            rows = (data.template == t).to(z.device)
+            mean[rows] = z[rows].mean(dim=0, keepdim=True)  # one average, copied back to every prompt of t
+
+        means[layer] = mean
+
+    return means
 
 
 def keep_mask(data, circuit: dict, keep_position: dict, seq_len: int) -> dict:
@@ -145,14 +193,44 @@ def keep_mask(data, circuit: dict, keep_position: dict, seq_len: int) -> dict:
 
     A circuit head is kept only at its class's KEEP_POSITION; every non-circuit head is ablated everywhere.
     """
-    raise NotImplementedError
+    n = len(data)
+    rows = torch.arange(n)
+
+    # start with every head ablated at every position
+    keep = {layer: torch.zeros(n, seq_len, N_HEADS, dtype=torch.bool) for layer in range(N_LAYERS)}
+
+    # turn each circuit head back on, but only at the one position where its class does its job
+    for cls, heads in circuit.items():
+        positions = data.pos[keep_position[cls]]  # [N], one position per prompt
+        for layer, head in heads:
+            keep[layer][rows, positions, head] = True
+
+    return keep
 
 
 def mean_ablation_hooks(keep: dict, means: dict) -> list:
     """TransformerLens fwd_hooks on blocks.{l}.attn.hook_z: z where keep is True, the template mean elsewhere."""
-    raise NotImplementedError
+
+    def make_hook(layer):
+        def hook(z, hook):
+            # [N, T, H] -> [N, T, H, 1] so it broadcasts over d_head
+            k = keep[layer].to(z.device)[..., None]
+            return torch.where(k, z, means[layer].to(z.device))
+
+        return hook
+
+    return [(f"blocks.{layer}.attn.hook_z", make_hook(layer)) for layer in keep]
 
 
 def ablate_heads_mask(data, heads: list, seq_len: int) -> dict:
     """Keep everything except `heads`, which are mean-ablated at every position."""
-    raise NotImplementedError
+    n = len(data)
+
+    # start with every head kept at every position
+    keep = {layer: torch.ones(n, seq_len, N_HEADS, dtype=torch.bool) for layer in range(N_LAYERS)}
+
+    # switch off the given heads everywhere
+    for layer, head in heads:
+        keep[layer][:, :, head] = False
+
+    return keep

@@ -1,7 +1,8 @@
 import torch
 from transformer_lens import patching as tl_patching
 
-from circuits import ALL_HEADS
+import metrics as M
+from circuits import ALL_HEADS, IOI_CIRCUIT, KEEP_POSITION
 from metrics import logit_diff
 from patching import end_logit_diff, head_patch_map, normalized_recovery, run_with_heads_patched
 
@@ -60,9 +61,19 @@ def test_fast_head_map_matches_transformer_lens(fp_model, data):
 
 def test_mean_ablation_keep_everything_is_identity(fp_model, data):
     """Mean-ablation hooks with a keep-everything mask leave the logits unchanged (atol 1e-4)."""
-    raise NotImplementedError
+    seq_len = data.tokens.shape[1]
+    keep = M.ablate_heads_mask(data, [], seq_len)  # ablate nothing
+    means = M.template_means(fp_model, data, data.abc)
+
+    clean = fp_model(data.tokens)
+    hooked = fp_model.run_with_hooks(data.tokens, fwd_hooks=M.mean_ablation_hooks(keep, means))
+
+    assert torch.allclose(hooked, clean, atol=1e-4)
 
 
 def test_keep_mask_marks_one_position_per_circuit_head(data):
     """keep_mask with IOI_CIRCUIT and KEEP_POSITION marks exactly (26 heads x N prompts) entries True."""
-    raise NotImplementedError
+    n, seq_len = data.tokens.shape
+    keep = M.keep_mask(data, IOI_CIRCUIT, KEEP_POSITION, seq_len)
+
+    assert sum(int(k.sum()) for k in keep.values()) == 26 * n
